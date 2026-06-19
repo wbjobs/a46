@@ -22,6 +22,15 @@ env/
 __pycache__/
 *.pyc
 
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+fib-generator/fib-generator
+fib-generator/fib-generator.exe
+
 # IDE
 .idea/
 .vscode/

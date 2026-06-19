@@ -1,0 +1,19 @@
+{
+  "name": "mystery-code-translator",
+  "version": "1.0.0",
+  "description": "神秘代码翻译系统 - 基于斐波那契数列的加密解密系统",
+  "scripts": {
+    "build:cli": "cd fib-generator && go build -o fib-generator.exe .",
+    "install:backend": "cd backend && npm install",
+    "install": "npm run build:cli && npm run install:backend",
+    "start": "cd backend && node server.js",
+    "dev": "cd backend && node server.js"
+  },
+  "keywords": [
+    "fibonacci",
+    "decryption",
+    "mystery-code"
+  ],
+  "author": "",
+  "license": "MIT"
+}
