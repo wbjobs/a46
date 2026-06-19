@@ -18,6 +18,7 @@ type Mapping struct {
 type DaemonRequest struct {
 	Command string   `json:"command"`
 	Numbers []string `json:"numbers,omitempty"`
+	Letters []string `json:"letters,omitempty"`
 	Count   int      `json:"count,omitempty"`
 	ID      string   `json:"id,omitempty"`
 }
@@ -33,16 +34,18 @@ type DaemonResponse struct {
 }
 
 type FibGenerator struct {
-	fibNumbers []*big.Int
-	mappings   map[string]string
-	maxCount   int
+	fibNumbers      []*big.Int
+	mappings        map[string]string
+	letterToNumber  map[string]string
+	maxCount        int
 }
 
 func NewFibGenerator() *FibGenerator {
 	fg := &FibGenerator{
-		fibNumbers: make([]*big.Int, 0),
-		mappings:   make(map[string]string),
-		maxCount:   26,
+		fibNumbers:     make([]*big.Int, 0),
+		mappings:       make(map[string]string),
+		letterToNumber: make(map[string]string),
+		maxCount:       26,
 	}
 	fg.generateUpTo(26)
 	return fg
@@ -63,8 +66,10 @@ func (fg *FibGenerator) generateUpTo(count int) {
 	currentLen := len(fg.fibNumbers)
 	if currentLen == 0 {
 		c := new(big.Int).Add(a, b)
+		numStr := c.String()
 		fg.fibNumbers = append(fg.fibNumbers, c)
-		fg.mappings[c.String()] = "A"
+		fg.mappings[numStr] = "A"
+		fg.letterToNumber["A"] = numStr
 		currentLen = 1
 		a.Set(b)
 		b.Set(c)
@@ -89,6 +94,7 @@ func (fg *FibGenerator) generateUpTo(count int) {
 		if i < 26 {
 			letter := string(rune('A' + i))
 			fg.mappings[numStr] = letter
+			fg.letterToNumber[letter] = numStr
 		}
 	}
 }
@@ -120,6 +126,36 @@ func (fg *FibGenerator) LookupNumbers(numbers []string) (map[string]string, []st
 	}
 
 	return results, errors
+}
+
+func (fg *FibGenerator) LookupLetters(letters []string) (map[string]string, []string) {
+	results := make(map[string]string)
+	errors := make([]string, 0)
+
+	for _, letter := range letters {
+		if letter == " " || letter == "" {
+			results[letter] = "0"
+			continue
+		}
+
+		upperLetter := strings.ToUpper(letter)
+		if number, ok := fg.letterToNumber[upperLetter]; ok {
+			results[letter] = number
+		} else {
+			errors = append(errors, fmt.Sprintf("Unknown letter: %s", letter))
+			results[letter] = "?"
+		}
+	}
+
+	return results, errors
+}
+
+func (fg *FibGenerator) GetLetterMappings() map[string]string {
+	result := make(map[string]string, len(fg.letterToNumber))
+	for k, v := range fg.letterToNumber {
+		result[k] = v
+	}
+	return result
 }
 
 func (fg *FibGenerator) GetMappingsList(count int) []Mapping {
@@ -268,6 +304,32 @@ func handleCommand(gen *FibGenerator, req DaemonRequest) DaemonResponse {
 			return resp
 		}
 		results, errors := gen.LookupNumbers(req.Numbers)
+		resp.Success = true
+		resp.Results = results
+		if len(errors) > 0 {
+			resp.Errors = errors
+		}
+
+	case "LOOKUP_LETTERS":
+		if len(req.Letters) == 0 {
+			resp.Success = false
+			resp.Message = "No letters provided"
+			return resp
+		}
+		results, errors := gen.LookupLetters(req.Letters)
+		resp.Success = true
+		resp.Results = results
+		if len(errors) > 0 {
+			resp.Errors = errors
+		}
+
+	case "ENCRYPT":
+		if len(req.Letters) == 0 {
+			resp.Success = false
+			resp.Message = "No letters provided"
+			return resp
+		}
+		results, errors := gen.LookupLetters(req.Letters)
 		resp.Success = true
 		resp.Results = results
 		if len(errors) > 0 {

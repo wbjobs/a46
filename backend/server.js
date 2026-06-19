@@ -260,6 +260,20 @@ class FibDaemon extends EventEmitter {
     };
   }
 
+  async lookupLetters(letters) {
+    if (!this.isReady) {
+      throw new Error('Daemon not ready');
+    }
+    const response = await this._sendRequest({
+      command: 'LOOKUP_LETTERS',
+      letters: letters
+    });
+    return {
+      results: response.results,
+      errors: response.errors || []
+    };
+  }
+
   stop() {
     this.isShuttingDown = true;
     if (this.process) {
@@ -280,19 +294,35 @@ const FALLBACK_MAPPING = {
   '121393': 'X', '196418': 'Y', '317811': 'Z'
 };
 
+const FALLBACK_REVERSE_MAPPING = {
+  'A': '2', 'B': '3', 'C': '5', 'D': '8', 'E': '13', 'F': '21', 'G': '34',
+  'H': '55', 'I': '89', 'J': '144', 'K': '233', 'L': '377', 'M': '610',
+  'N': '987', 'O': '1597', 'P': '2584', 'Q': '4181', 'R': '6765',
+  'S': '10946', 'T': '17711', 'U': '28657', 'V': '46368', 'W': '75025',
+  'X': '121393', 'Y': '196418', 'Z': '317811'
+};
+
 class FibCache {
   constructor() {
     this.l1Cache = { ...FALLBACK_MAPPING };
+    this.l1ReverseCache = { ...FALLBACK_REVERSE_MAPPING };
     this.l2Cache = new LRUCache(5000);
+    this.l2ReverseCache = new LRUCache(5000);
     this.daemon = null;
     this.fallbackMapping = FALLBACK_MAPPING;
+    this.fallbackReverseMapping = FALLBACK_REVERSE_MAPPING;
     this.isInitialized = false;
     this.stats = {
       l1Hits: 0,
       l2Hits: 0,
       daemonHits: 0,
       fallbackHits: 0,
-      misses: 0
+      misses: 0,
+      encryptL1Hits: 0,
+      encryptL2Hits: 0,
+      encryptDaemonHits: 0,
+      encryptFallbackHits: 0,
+      encryptMisses: 0
     };
   }
 
@@ -302,11 +332,16 @@ class FibCache {
     try {
       const mappings = await daemon.getMappings();
       this.l1Cache = { ...mappings };
+      this.l1ReverseCache = {};
+      for (const [num, letter] of Object.entries(mappings)) {
+        this.l1ReverseCache[letter] = num;
+      }
       this.isInitialized = true;
       console.log('L1 cache preloaded from daemon with', Object.keys(mappings).length, 'mappings');
     } catch (error) {
       console.warn('Failed to preload cache from daemon:', error.message);
       this.l1Cache = { ...FALLBACK_MAPPING };
+      this.l1ReverseCache = { ...FALLBACK_REVERSE_MAPPING };
       this.isInitialized = true;
     }
   }
@@ -332,6 +367,31 @@ class FibCache {
 
   set(number, value) {
     this.l2Cache.set(number, value);
+  }
+
+  getLetter(letter) {
+    if (letter === ' ' || letter === '') {
+      return { value: '0', source: 'builtin' };
+    }
+
+    const upperLetter = letter.toUpperCase();
+    
+    if (upperLetter in this.l1ReverseCache) {
+      this.stats.encryptL1Hits++;
+      return { value: this.l1ReverseCache[upperLetter], source: 'l1' };
+    }
+    
+    const l2Value = this.l2ReverseCache.get(upperLetter);
+    if (l2Value !== undefined) {
+      this.stats.encryptL2Hits++;
+      return { value: l2Value, source: 'l2' };
+    }
+    
+    return null;
+  }
+
+  setLetter(letter, value) {
+    this.l2ReverseCache.set(letter.toUpperCase(), value);
   }
 
   async lookupBulk(numbers) {
@@ -385,11 +445,65 @@ class FibCache {
     return { results, allCached: false };
   }
 
+  async lookupLettersBulk(letters) {
+    const results = {};
+    const toLookup = [];
+    
+    for (const letter of letters) {
+      const cached = this.getLetter(letter);
+      if (cached) {
+        results[letter] = cached.value;
+      } else {
+        toLookup.push(letter);
+      }
+    }
+    
+    if (toLookup.length === 0) {
+      return { results, allCached: true };
+    }
+    
+    if (this.daemon && this.daemon.isReady) {
+      try {
+        const { results: daemonResults, errors } = await this.daemon.lookupLetters(toLookup);
+        this.stats.encryptDaemonHits += toLookup.length;
+        
+        for (const letter of toLookup) {
+          const value = daemonResults[letter];
+          if (value && value !== '?') {
+            this.setLetter(letter, value);
+          }
+          results[letter] = value || '?';
+        }
+        
+        return { results, errors, allCached: false };
+      } catch (error) {
+        console.warn('Daemon letter lookup failed, using fallback:', error.message);
+      }
+    }
+    
+    for (const letter of toLookup) {
+      const upperLetter = letter.toUpperCase();
+      const value = this.fallbackReverseMapping[upperLetter];
+      if (value) {
+        this.stats.encryptFallbackHits++;
+        results[letter] = value;
+        this.setLetter(letter, value);
+      } else {
+        this.stats.encryptMisses++;
+        results[letter] = '?';
+      }
+    }
+    
+    return { results, allCached: false };
+  }
+
   getStats() {
     return {
       ...this.stats,
       l1Size: Object.keys(this.l1Cache).length,
-      l2Size: this.l2Cache.size()
+      l2Size: this.l2Cache.size(),
+      l1ReverseSize: Object.keys(this.l1ReverseCache).length,
+      l2ReverseSize: this.l2ReverseCache.size()
     };
   }
 }
@@ -457,6 +571,54 @@ function decryptCode(code) {
   });
 }
 
+function encryptText(text) {
+  const chars = [];
+  for (let i = 0; i < text.length; i++) {
+    chars.push(text[i]);
+  }
+  
+  const uniqueLetters = [...new Set(chars.filter(c => c !== ' ' && c !== ''))];
+  
+  return fibCache.lookupLettersBulk(uniqueLetters).then(({ results, errors }) => {
+    let encrypted = '';
+    const errorList = errors ? [...errors] : [];
+    
+    for (let i = 0; i < chars.length; i++) {
+      const char = chars[i];
+      
+      if (char === ' ') {
+        if (encrypted.length > 0) {
+          encrypted += ' ';
+        }
+        encrypted += '0';
+        continue;
+      }
+      
+      const number = results[char];
+      if (number && number !== '?') {
+        if (encrypted.length > 0) {
+          encrypted += ' ';
+        }
+        encrypted += number;
+      } else {
+        if (encrypted.length > 0) {
+          encrypted += ' ';
+        }
+        encrypted += '?';
+        if (!errorList.some(e => e.includes(char))) {
+          errorList.push(`Unknown character at position ${i + 1}: ${char}`);
+        }
+      }
+    }
+    
+    return {
+      original: text,
+      encrypted: encrypted,
+      errors: errorList.length > 0 ? errorList : null
+    };
+  });
+}
+
 app.get('/api/mapping', async (req, res) => {
   try {
     const mapping = { ...fibCache.l1Cache };
@@ -500,6 +662,31 @@ app.post('/api/decrypt', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Internal server error during decryption'
+    });
+  }
+});
+
+app.post('/api/encrypt', async (req, res) => {
+  const { text } = req.body;
+  
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing or invalid "text" parameter'
+    });
+  }
+  
+  try {
+    const result = await encryptText(text);
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('Encryption error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error during encryption'
     });
   }
 });
